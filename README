@@ -1,0 +1,183 @@
+NAME
+    Apache::Watchdog::RunAway - a monitor for hanging processes
+
+SYNOPSIS
+      stop_monitor();
+      start_monitor();
+      start_detached_monitor();
+
+      $Apache::Watchdog::RunAway::TIMEOUT = 0;
+      $Apache::Watchdog::RunAway::POLLTIME = 60;
+      $Apache::Watchdog::RunAway::DEBUG = 0;
+      $Apache::Watchdog::RunAway::LOCK_FILE = "/tmp/safehang.lock";
+      $Apache::Watchdog::RunAway::LOG_FILE = "/tmp/safehang.log";
+      $Apache::Watchdog::RunAway::SCOREBOARD_URL = "http://localhost/scoreboard";
+
+DESCRIPTION
+    A module that monitors hanging Apache/mod_perl processes. You define the
+    time in seconds after which the process to be counted as hanging. You
+    also control the polling time between check to check.
+
+    When the process is considered as 'hanging' it will be killed and the
+    event logged into a log file. The log file is being opened on append, so
+    you can basically defined the same log file that uses Apache.
+
+    You can start this process from startup.pl or through any other method.
+    (e.g. a crontab). Once started it runs indefinitely, untill killed.
+
+    You cannot start a new monitoring process before you kill the old one.
+    The lockfile will prevent you from doing that.
+
+    Generally you should use the `amprapmon' program that bundled with this
+    module's distribution package, but you can write your own code using the
+    module as well. See the amprapmon manpage for more info about it.
+
+    Methods:
+
+    * stop_monitor()
+        Stop the process based on the PID in the lock file. Remove the lock
+        file.
+
+    * start_monitor()
+        Starts the monitor in the current process. Create the lock file.
+
+    * start_detached_monitor()
+        Starts the monitor in a forked process. (used by `amprapmon').
+        Create the lock file.
+
+WARNING
+    This is an alpha version of the module, so use it after a testing on
+    development machine.
+
+    The most critical parameter is the value of
+    *$Apache::Watchdog::RunAway::TIMEOUT* (see CONFIGURATION), since the
+    processes will be killed without waiting for them to quit (since they
+    hung).
+
+CONFIGURATION
+    Install and configure `Apache::Scoreboard' module
+
+     <Location /scoreboard>
+        SetHandler perl-script
+        PerlHandler Apache::Scoreboard::send
+        order deny,allow
+     #    deny from all
+     #    allow from ...
+     </Location>
+
+    Configure the Apache::Watchdog::RunAway parameters:
+
+      $Apache::Watchdog::RunAway::TIMEOUT = 0;
+
+    The time in seconds after which the process is considered hanging. 0
+    means deactivated. The default is 0 (deactivated).
+
+      $Apache::Watchdog::RunAway::POLLTIME = 60;
+
+    Polling intervals in seconds. The default is 60.
+
+      $Apache::Watchdog::RunAway::DEBUG = 0;
+
+    Debug mode (0 or 1). The default is 0.
+
+      $Apache::Watchdog::RunAway::LOCK_FILE = "/tmp/safehang.lock";
+
+    The process lock file location. The default is */tmp/safehang.lock*
+
+      $Apache::Watchdog::RunAway::LOG_FILE = "/tmp/safehang.log";
+
+    The log file location. Since it flocks the file, you can safely use the
+    same log file that Apache uses, so you will get the messages about
+    killed processes in file you've got used to. The default is
+    */tmp/safehang.log*
+
+      $Apache::Watchdog::RunAway::SCOREBOARD_URL = "http://localhost/scoreboard";
+
+    Since the process relies on scoreboard URL configured on any of your
+    machines (the URL returns a binary image that includes the status of the
+    server and its children), you must specify it. This enables you to run
+    the monitor on one machine while the server can run on the other
+    machine. The default is URI is *http://localhost/scoreboard*.
+
+    Start the monitoring process either with:
+
+      start_detached_monitor()
+
+    that starts the monitor in a forked process or
+
+      start_monitor()
+
+    that starts the monitor in the current process.
+
+    Stop the process with:
+
+    stop_monitor()
+
+    The distribution arrives with `amprapmon' program that provides an rc.d
+    like or apachectl interface.
+
+    Instead of using a Perl interface you can start it from the command
+    line:
+
+      amprapmon start
+
+    or from the *startup.pl* file:
+
+      system "amprapmon start";
+
+    or
+
+      system "amprapmon stop";
+      system "amprapmon start";
+
+    or
+
+      system "amprapmon restart";
+
+    As mentioned before, once started it sholdn't be killed. So you may
+    leave only the `system "amprapmon start";' in the *startup.pl*
+
+    You can start the `amprapmon' program from crontab as well.
+
+TUNING
+    The most important part of configuration is choosing the right timeout
+    (aka $Apache::Watchdog::RunAway::TIMEOUT) parameter. You should try this
+    code that hangs and see the process killed after a timeout if the
+    monitor is running.
+
+      my $r = shift;
+      $r->send_http_header('text/plain');
+      print "PID = $$\n";
+      $r->rflush;
+      while(1){
+        $r->print("\0");
+        $r->rflush;
+        $i++;
+        sleep 1;
+      }
+
+TROUBLESHOOTING
+    The module relies on correctly configured `/scoreboard' location URI. If
+    it cannot fetch the URI, it queitly assumes that server is stopped. So
+    either check manually that the `/scoreboard' location URI is working or
+    use the above test script that hangs to make sure it works.
+
+    Enable debug mode for more information.
+
+PREREQUISITES
+    You need to have Apache::Scoreboard installed and configured in
+    *httpd.conf*.
+
+BUGS
+    Was ist dieses?
+
+SEE ALSO
+    the Apache manpage, the mod_perl manpage, the Apache::Scoreboard manpage
+
+AUTHORS
+    Stas Bekman <sbekman@iname.com>
+
+COPYRIGHT
+    Apache::Watchdog::RunAway is free software; you can redistribute it
+    and/or modify it under the same terms as Perl itself.
+

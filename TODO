@@ -1,0 +1,5 @@
+* if it's polling the server every so often, it might as well generate
+  a periodic report of what it finds.  How many processes, how long
+  each has been running, how much memory, etc.
+
+
