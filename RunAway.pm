@@ -1,9 +1,6 @@
 package Apache::Watchdog::RunAway;
 
-BEGIN {
-  # RCS/CVS complient:  must be all one line, for MakeMaker
-  $Apache::VMonitor::VERSION = do { my @r = (q$Revision: 0.01 $ =~ /\d+/g); sprintf "%d."."%02d" x $#r, @r }; 
-}
+$Apache::VMonitor::VERSION = 0.3;
 
 use strict;
 use Apache::Scoreboard ();
@@ -11,7 +8,7 @@ use Apache::Constants ();
 use Symbol ();
 use Apache ();
 
-
+use subs qw(debug log_error);
 
 ########## user configurable variables #########
 
@@ -34,212 +31,235 @@ $Apache::Watchdog::RunAway::LOG_FILE = "/tmp/safehang.log";
 # scoreboard URL
 $Apache::Watchdog::RunAway::SCOREBOARD_URL = "http://localhost/scoreboard";
 
+# give details about the request that was hanging
+$Apache::Watchdog::RunAway::VERBOSE = 0;
+
 ########## internal variables #########
 
 # request processing times cache
-%Apache::Watchdog::RunAway::req_proc_time = ();
+my %req_proc_time = ();
 
 # current request number
-%Apache::Watchdog::RunAway::req_number = ();
+my %req_number = ();
 
+open LOG, ">>$Apache::Watchdog::RunAway::LOG_FILE"
+    or die "Cannot open $Apache::Watchdog::RunAway::LOG_FILE";
+my $oldfh = select(LOG); $| = 1; select($oldfh);
 
 # check whether the monitor is already running
 # returns the PID if lockfile exists
 ##############
-sub is_running{
+sub is_running {
 
-  return 0 unless -e $Apache::Watchdog::RunAway::LOCK_FILE;
+    return 0 unless -e $Apache::Watchdog::RunAway::LOCK_FILE;
 
-  my $pid = get_proc_pid();
+    my $pid = get_proc_pid();
 
-  print STDERR qq{$0 is already running (proc $pid). Locked in $Apache::Watchdog::RunAway::LOCK_FILE.};
+    warn <<EOT if $Apache::Watchdog::RunAway::DEBUG;
+$0 is already running (proc $pid).
+Locked in $Apache::Watchdog::RunAway::LOCK_FILE.
+EOT
 
-  return $pid;
+    return $pid;
 
-} # end of sub is_running
+}
 
 
 # returns the PID if lockfile exists or 0
 ################
-sub get_proc_pid{
+sub get_proc_pid {
 
-  my $fh = Symbol::gensym();
-  open $fh, $Apache::Watchdog::RunAway::LOCK_FILE 
-    or die "Cannot open $Apache::Watchdog::RunAway::LOCK_FILE: $!";
-  chomp (my $pid = <$fh>);
-  $pid = 0 unless $pid =~ /^\d+$/;
-  close $fh;
+    my $fh = Symbol::gensym();
+    open $fh, $Apache::Watchdog::RunAway::LOCK_FILE
+        or die "Cannot open $Apache::Watchdog::RunAway::LOCK_FILE: $!";
+    chomp (my $pid = <$fh>);
+    $pid = 0 unless $pid =~ /^\d+$/;
+    close $fh;
 
-  return $pid;
-} # end of get_proc_pid
+    return $pid;
+}
 
 
 # create the lockfile and put the PID inside
 ##############
-sub lock{
+sub lock {
 
-  my $fh = Symbol::gensym();
-  open $fh, ">".$Apache::Watchdog::RunAway::LOCK_FILE
-    or die "Cannot open $Apache::Watchdog::RunAway::LOCK_FILE: $!";
-  flock $fh, 2;
-  seek $fh, 0, 0;
-  print $fh $$;
-  close $fh;
+    my $fh = Symbol::gensym();
+    open $fh, ">".$Apache::Watchdog::RunAway::LOCK_FILE
+        or die "Cannot open $Apache::Watchdog::RunAway::LOCK_FILE: $!";
+    flock $fh, 2;
+    seek $fh, 0, 0;
+    print $fh $$;
+    close $fh;
 
-} # end of lock
+}
 
 
 #################
-sub stop_monitor{
-  
-  unless (-e $Apache::Watchdog::RunAway::LOCK_FILE) {
-    print "$0: Lockfile $Apache::Watchdog::RunAway::LOCK_FILE doesn't exist. Exitting...\n";
-    return;
-  }
-  
-  my $pid = get_proc_pid();
+sub stop_monitor {
 
-  my $killed = kill 15, $pid if $pid;
-  print "$0: Process $pid was killed\n" if $killed;
+    unless (-e $Apache::Watchdog::RunAway::LOCK_FILE) {
+        warn <<EOT if $Apache::Watchdog::RunAway::DEBUG;
+$0: Lockfile $Apache::Watchdog::RunAway::LOCK_FILE does not exist. Exitting...
+EOT
+        return;
+    }
+
+    my $pid = get_proc_pid();
+
+    my $killed = kill 15, $pid if $pid;
+    warn "$0: monitor process $pid was killed\n" 
+        if $killed && $Apache::Watchdog::RunAway::DEBUG;
 
     # unlock the lockfile
-  unlink $Apache::Watchdog::RunAway::LOCK_FILE;
+    unlink $Apache::Watchdog::RunAway::LOCK_FILE;
 
-} # end of stop_monitor
+}
 
 
 ##################
-sub start_detached_monitor{
-  
-  defined (my $watchdog_pid = fork) or die "Cannot fork: $!\n";
-  
-  start_monitor() unless $watchdog_pid;
+sub start_detached_monitor {
 
-} # end of sub start_detached_monitor
+    defined (my $watchdog_pid = fork) or die "Cannot fork: $!\n";
+
+    start_monitor() unless $watchdog_pid;
+
+}
 
 
 #################
-sub start_monitor{
+sub start_monitor {
 
     # 0 means don't monitor
-  return unless $Apache::Watchdog::RunAway::TIMEOUT;
+    return unless $Apache::Watchdog::RunAway::TIMEOUT;
 
-  # handle the case where apache restarts itself, either on start or
-  # with PerlFresh ON... this is a closure to protect this variable
-  # from user. it's inaccessable outside of this module
-  return if is_running();
+    # handle the case where apache restarts itself, either on start or
+    # with PerlFresh ON... this is a closure to protect this variable
+    # from user. it's inaccessable outside of this module
+    return if is_running();
 
     # The forked process is supposed to run as long as main process
     # runs, so we don't care about wait()
-  warn "$0: spawned a monitor process $$\n";
-#      if $Apache::Watchdog::RunAway::DEBUG;
+    warn "$0: spawned a monitor process $$\n"
+        if $Apache::Watchdog::RunAway::DEBUG;
 
     # create a lock file
-  lock();
-
-#    # redirect all messages to the log file
-#  open STDERR, ">>$Apache::Watchdog::RunAway::LOG_FILE" or 
-#    die "Cannot open >>$Apache::Watchdog::RunAway::LOG_FILE: $!";
+    lock();
 
     # neverending loop
-  while (1) {
-#    warn(__PACKAGE__.": $$ sleeping $Apache::Watchdog::RunAway::POLLTIME\n")
-#      if $Apache::Watchdog::RunAway::DEBUG;
-    monitor();
-    sleep $Apache::Watchdog::RunAway::POLLTIME;
-  }
+    while (1) {
+        monitor();
+        debug "sleeping $Apache::Watchdog::RunAway::POLLTIME";
+        sleep $Apache::Watchdog::RunAway::POLLTIME;
+    }
 
-} # end of sub start_monitor
+}
 
 
 # the real code that does all the accounting and killings
 ############
-sub monitor{
+sub monitor {
 
-  my $image = Apache::Scoreboard->fetch($Apache::Watchdog::RunAway::SCOREBOARD_URL);
-  unless ($image){
-      # reset the counters and timers
-    %Apache::Watchdog::RunAway::req_proc_time = ();
-    %Apache::Watchdog::RunAway::req_number = ();
-    return;
-  }
-
-  for (my $i = 0; $i<Apache::Constants::HARD_SERVER_LIMIT; $i++) {
-    my $pid = $image->parent($i)->pid;
-
-    last unless $pid;
-
-    my $process = $image->servers($i);
-      # we care only about processes that kin 'W' status
-      # processing. this is very not clean coding style: (W means
-      # 'writing to a client' and it's equal to 4 in status field
-    next unless $process->status == 4;
-
-      # init if it's uninitialized (to non existant -1 count)
-      # can't use ||= construct as a value can be 0...
-    $Apache::Watchdog::RunAway::req_number{$pid} = -1 unless exists $Apache::Watchdog::RunAway::req_number{$pid};
-      # make sure the proc time is initialized
-    $Apache::Watchdog::RunAway::req_proc_time{$pid} ||= 0;
-
-    my $count = $process->my_access_count;
-#    warn "OK $i $pid ",$process->status," $count ",
-#      $Apache::Watchdog::RunAway::req_proc_time{$pid}," ",
-#    $Apache::Watchdog::RunAway::req_number{$pid},"\n";
-
-    if ($count == $Apache::Watchdog::RunAway::req_number{$pid}) {
-
-       # the same request is still being processed
-      if ($Apache::Watchdog::RunAway::req_proc_time{$pid} > $Apache::Watchdog::RunAway::TIMEOUT) {
-
-	my $fh = Symbol::gensym();
-	open $fh, ">>".$Apache::Watchdog::RunAway::LOG_FILE
-	  or die "Cannot open >>$Apache::Watchdog::RunAway::LOG_FILE: $!";
-	flock $fh, 2;
-	seek $fh, 0, 2; # go to eof
-	print $fh "[".scalar localtime()."] ".__PACKAGE__.
-	  qq{: child proc $pid seems to hang -- 
-it is running longer than limit of $Apache::Watchdog::RunAway::TIMEOUT secs (\$Apache::Watchdog::RunAway::TIMEOUT). 
-Killing proc $pid.\n};
-	close $fh;
-	kill 9, $pid;
-
-    # META: should I kill or just send a SIGPIPE to a hanging process?
-
-      } else {
-	#warn "o0o\n";
-	  # Note: this is not true processing time, since there is a
-	  # work done between sleeps, but it takes less than 1 second
-	$Apache::Watchdog::RunAway::req_proc_time{$pid} += $Apache::Watchdog::RunAway::POLLTIME;
-      }
-
-    } else {
-      $Apache::Watchdog::RunAway::req_number{$pid} = $count;	
-        # reset time delta
-      $Apache::Watchdog::RunAway::req_proc_time{$pid} = 0;
+    my $image = Apache::Scoreboard->fetch($Apache::Watchdog::RunAway::SCOREBOARD_URL);
+    unless ($image){
+        # reset the counters and timers
+        %req_proc_time = ();
+        %req_number = ();
+        debug "couldn't retrieve the scoreboard image ",
+              "from $Apache::Watchdog::RunAway::SCOREBOARD_URL";
+        return;
     }
 
-  } # end of for (my $i=-1; ...
+    for (my $i = 0; $i<Apache::Constants::HARD_SERVER_LIMIT; $i++) {
+        my $pid = $image->parent($i)->pid;
 
-}  # end of sub monitor
+        last unless $pid;
+
+        my $process = $image->servers($i);
+
+        # we care only about processes that in 'W' status
+        # processing. this is very not clean coding style: (W means
+        # 'writing to a client' and it's equal to 4 in status field
+        next unless $process->status == 4;
+
+        # init if it's uninitialized (to non existant -1 count)
+        # can't use ||= construct as a value can be 0...
+        $req_number{$pid} = -1
+            unless exists $req_number{$pid};
+
+        # make sure the proc time is initialized
+        $req_proc_time{$pid} ||= 0;
+
+        my $count = $process->my_access_count;
+        debug "OK: $i $pid ",
+            $process->status, " $count ",
+            $req_proc_time{$pid}, " ",
+            $req_number{$pid};
+
+        if ($count == $req_number{$pid}) {
+
+            # the same request is still being processed
+            if ($req_proc_time{$pid} > $Apache::Watchdog::RunAway::TIMEOUT) {
+
+                my $error = <<EOT;
+Killing httpd process $pid which is running for $req_proc_time{$pid} secs,
+which is longer than $Apache::Watchdog::RunAway::TIMEOUT secs limit.
+EOT
+                if ($Apache::Watchdog::RunAway::VERBOSE) {
+                    $error .= 'It was handling [' . $process->request() .
+                        '] for [' . $process->client() . "]\n";
+                }
+                log_error $error;
+
+                # META: should I kill or just send a SIGPIPE to a hanging process?
+                kill 9, $pid;
+
+            } else {
+                #warn "o0o\n";
+                # Note: this is not true processing time, since there is a
+                # work done between sleeps, but it takes less than 1 second
+                $req_proc_time{$pid} += $Apache::Watchdog::RunAway::POLLTIME;
+            }
+
+        } else {
+            $req_number{$pid} = $count;	
+            # reset time delta
+            $req_proc_time{$pid} = 0;
+        }
+
+    }
+
+}
+
+sub debug {
+    log_error(@_) if $Apache::Watchdog::RunAway::DEBUG > 1;
+}
+
+sub log_error {
+    print LOG  "[".scalar localtime()."] $$: " . __PACKAGE__ ,": ", @_, "\n";
+}
+
 
 =pod
 
 =head1 NAME
 
-Apache::Watchdog::RunAway - a monitor for hanging processes
+Apache::Watchdog::RunAway - a Monitor for Terminating Hanging Apache Processes
 
 =head1 SYNOPSIS
 
-  stop_monitor();
-  start_monitor();
-  start_detached_monitor();
-
+  use Apache::Watchdog::RunAway ();
   $Apache::Watchdog::RunAway::TIMEOUT = 0;
   $Apache::Watchdog::RunAway::POLLTIME = 60;
   $Apache::Watchdog::RunAway::DEBUG = 0;
   $Apache::Watchdog::RunAway::LOCK_FILE = "/tmp/safehang.lock";
   $Apache::Watchdog::RunAway::LOG_FILE = "/tmp/safehang.log";
   $Apache::Watchdog::RunAway::SCOREBOARD_URL = "http://localhost/scoreboard";
+  $Apache::Watchdog::RunAway::VERBOSE = 0;
+
+  Apache::Watchdog::RunAway::stop_monitor();
+  Apache::Watchdog::RunAway::start_monitor();
+  Apache::Watchdog::RunAway::start_detached_monitor();
 
 =head1 DESCRIPTION
 
@@ -268,17 +288,17 @@ Methods:
 
 =item * stop_monitor()
 
-Stop the process based on the PID in the lock file. Remove the lock
+Stops the process based on the PID in the lock file. Removes the lock
 file.
 
 =item * start_monitor()
 
-Starts the monitor in the current process. Create the lock file.
+Starts the monitor in the current process. Creates the lock file.
 
 =item * start_detached_monitor()
 
-Starts the monitor in a forked process. (used by C<amprapmon>). Create
-the lock file.
+Starts the monitor in a forked process. (used by
+C<amprapmon>). Creates the lock file.
 
 =back
 
@@ -296,13 +316,18 @@ without waiting for them to quit (since they hung).
 
 Install and configure C<Apache::Scoreboard> module
 
- <Location /scoreboard>
+  # mod_status should be compiled in (it is by default)
+  ExtendedStatus On
+
+  <Location /scoreboard>
     SetHandler perl-script
     PerlHandler Apache::Scoreboard::send
-    order deny,allow
- #    deny from all
- #    allow from ...
- </Location>
+  </Location>
+
+You also need to have mod_status built in and its extended status to
+be turned on:
+
+  ExtendedStatus On
 
 Configure the Apache::Watchdog::RunAway parameters:
 
@@ -317,7 +342,8 @@ Polling intervals in seconds. The default is 60.
 
   $Apache::Watchdog::RunAway::DEBUG = 0;
 
-Debug mode (0 or 1). The default is 0.
+Debug mode (0, 1 or 2). The default is 0.
+Level 2 logs a lot of debug noise. Level 1 only logs killed processes info.
 
   $Apache::Watchdog::RunAway::LOCK_FILE = "/tmp/safehang.lock";
 
@@ -337,6 +363,11 @@ machines (the URL returns a binary image that includes the status of
 the server and its children), you must specify it. This enables you to
 run the monitor on one machine while the server can run on the other
 machine. The default is URI is I<http://localhost/scoreboard>.
+
+  $Apache::Watchdog::RunAway::VERBOSE = 0;
+
+When about to forcibly kill a child, it will report in the log the
+first 64 bytes of the request and the remote IP of the client.
 
 Start the monitoring process either with:
 
@@ -380,9 +411,9 @@ You can start the C<amprapmon> program from crontab as well.
 =head1 TUNING
 
 The most important part of configuration is choosing the right timeout
-(aka $Apache::Watchdog::RunAway::TIMEOUT) parameter. You should try
-this code that hangs and see the process killed after a timeout if the
-monitor is running.
+(i.e. C<$Apache::Watchdog::RunAway::TIMEOUT>) parameter. You should
+try this code that hangs and see the process killed after a timeout if
+the monitor is running.
 
   my $r = shift;
   $r->send_http_header('text/plain');
@@ -408,7 +439,12 @@ Enable debug mode for more information.
 =head1 PREREQUISITES
 
 You need to have B<Apache::Scoreboard> installed and configured in
-I<httpd.conf>.
+I<httpd.conf>, which in turn requires mod_status to be installed. You
+also have to enable the extended status, for this module to work
+properly. In I<httpd.conf> add:
+
+  ExtendedStatus On
+
 
 =head1 BUGS
 
@@ -420,11 +456,11 @@ L<Apache>, L<mod_perl>, L<Apache::Scoreboard>
 
 =head1 AUTHORS
 
-Stas Bekman <sbekman@iname.com>
+Stas Bekman <stas@stason.org>
 
 =head1 COPYRIGHT
 
-Apache::Watchdog::RunAway is free software; you can redistribute it
+C<Apache::Watchdog::RunAway> is free software; you can redistribute it
 and/or modify it under the same terms as Perl itself.
 
 =cut

@@ -1,5 +1,15 @@
 =head1 CHANGES (Apache::Watchdog::RunAway)
 
+=head1 ver 0.3 - Wed Feb 20 14:09:32 SGT 2002
+
+* rewrite debug and error handling code, so one can actually benefit
+  from debug levels
+
+=head1 ver 0.2 - Tue May 15 09:46:43 SGT 2001
+
+* now printing the request info for the hanging process that gets
+  killed (a patch by Philippe M. Chiasson <gozer@ectoplasm.org>)
+
 =head1 ver 0.1 - Tue Feb 22 11:34:14 IST 2000
 
 * First version released

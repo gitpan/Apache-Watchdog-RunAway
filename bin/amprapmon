@@ -10,6 +10,7 @@ $Apache::Watchdog::RunAway::POLLTIME = 5;
 $Apache::Watchdog::RunAway::LOCK_FILE = "/tmp/safehang.lock";
 $Apache::Watchdog::RunAway::SCOREBOARD_URL = "http://localhost/scoreboard";
 $Apache::Watchdog::RunAway::LOG_FILE = "/tmp/safehang.log";
+$Apache::Watchdog::RunAway::VERBOSE = 0;
 
 ### End User configurable part ###
 
@@ -19,20 +20,22 @@ $Apache::Watchdog::RunAway::LOG_FILE = "/tmp/safehang.log";
 usage() unless @ARGV == 1;
 
 if ($ARGV[0] eq 'start') {
-  Apache::Watchdog::RunAway::start_detached_monitor();
-} elsif ($ARGV[0] eq 'restart') {
-  Apache::Watchdog::RunAway::stop_monitor();
-  Apache::Watchdog::RunAway::start_detached_monitor();
-} elsif ($ARGV[0] eq 'stop') {
-  Apache::Watchdog::RunAway::stop_monitor();
-} else {
-  usage();
+    Apache::Watchdog::RunAway::start_detached_monitor();
+}
+elsif ($ARGV[0] eq 'restart') {
+    Apache::Watchdog::RunAway::stop_monitor();
+    Apache::Watchdog::RunAway::start_detached_monitor();
+}
+elsif ($ARGV[0] eq 'stop') {
+    Apache::Watchdog::RunAway::stop_monitor();
+}
+else {
+    usage();
 }
 
 #########
-sub usage{
-  die qq{\tusage: $0 start|stop|restart\n};
-
+sub usage {
+    die qq{\tusage: $0 start|stop|restart\n};
 }
 
 __END__
@@ -45,7 +48,7 @@ amprapmon - Apache ModPerl RunAway Processes MONitor
 
 =head1 SYNOPSIS
 
-  amprapmon <start|stop|restart>
+  % amprapmon <start|stop|restart>
 
 =head1 CONFIGURATION
 
@@ -55,8 +58,8 @@ Apache::Watchdog::RunAway for more info.
 
 =head1 DESCRIPTION
 
-The amprapmon program is uses C<Apache::Watchdog::RunAway> module to monitor and
-kill off hanging Apache/mod_perl processes.
+The amprapmon program is uses C<Apache::Watchdog::RunAway> module to
+monitor and kill off hanging Apache/mod_perl processes.
 
 The amprapmon program can run even when the Apache/mod_perl server is
 stopped (it'll just wait for a server to start).  There is no need to
