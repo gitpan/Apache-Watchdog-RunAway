@@ -1,3 +1,6 @@
+* improve the test suite to run a slow response handler (sleep 20) and
+  check that we actually spot and kill that process
+
 * if it's polling the server every so often, it might as well generate
   a periodic report of what it finds.  How many processes, how long
   each has been running, how much memory, etc.

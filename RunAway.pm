@@ -1,12 +1,26 @@
 package Apache::Watchdog::RunAway;
 
-$Apache::VMonitor::VERSION = 0.3;
+$Apache::VMonitor::VERSION = '1.00';
 
 use strict;
+
+BEGIN {
+    use constant MP2 => eval { require mod_perl; $mod_perl::VERSION > 1.99 };
+    die "mod_perl is required to run this module: $@" if $@;
+
+    if (MP2) {
+        require APR::Pool;
+    } else {
+        # nada
+    }
+}
+
 use Apache::Scoreboard ();
-use Apache::Constants ();
 use Symbol ();
-use Apache ();
+
+if (MP2 && require Apache::MPM && Apache::MPM->is_threaded()) {
+    die __PACKAGE__ . " is suitable to be used only under prefork MPM";
+}
 
 use subs qw(debug log_error);
 
@@ -42,9 +56,7 @@ my %req_proc_time = ();
 # current request number
 my %req_number = ();
 
-open LOG, ">>$Apache::Watchdog::RunAway::LOG_FILE"
-    or die "Cannot open $Apache::Watchdog::RunAway::LOG_FILE";
-my $oldfh = select(LOG); $| = 1; select($oldfh);
+my $log_fh;
 
 # check whether the monitor is already running
 # returns the PID if lockfile exists
@@ -73,7 +85,8 @@ sub get_proc_pid {
     open $fh, $Apache::Watchdog::RunAway::LOCK_FILE
         or die "Cannot open $Apache::Watchdog::RunAway::LOCK_FILE: $!";
     chomp (my $pid = <$fh>);
-    $pid = 0 unless $pid =~ /^\d+$/;
+    # untaint
+    $pid = $pid =~ /^(\d+)$/ ? $1 : 0;
     close $fh;
 
     return $pid;
@@ -100,7 +113,7 @@ sub stop_monitor {
 
     unless (-e $Apache::Watchdog::RunAway::LOCK_FILE) {
         warn <<EOT if $Apache::Watchdog::RunAway::DEBUG;
-$0: Lockfile $Apache::Watchdog::RunAway::LOCK_FILE does not exist. Exitting...
+$0: Lockfile $Apache::Watchdog::RunAway::LOCK_FILE does not exist. Exiting...
 EOT
         return;
     }
@@ -122,8 +135,15 @@ sub start_detached_monitor {
 
     defined (my $watchdog_pid = fork) or die "Cannot fork: $!\n";
 
-    start_monitor() unless $watchdog_pid;
-
+    if ($watchdog_pid) {
+        warn "detached monitor pid $watchdog_pid started\n"
+            if $Apache::Watchdog::RunAway::DEBUG;
+        return $watchdog_pid;
+    }
+    else {
+        start_monitor();
+        CORE::exit();
+    }
 }
 
 
@@ -155,12 +175,23 @@ sub start_monitor {
 
 }
 
+my $pool;
 
 # the real code that does all the accounting and killings
 ############
 sub monitor {
 
-    my $image = Apache::Scoreboard->fetch($Apache::Watchdog::RunAway::SCOREBOARD_URL);
+    die "\$Apache::Watchdog::RunAway::SCOREBOARD_URL is not set"
+        unless $Apache::Watchdog::RunAway::SCOREBOARD_URL;
+
+    my @args = ($Apache::Watchdog::RunAway::SCOREBOARD_URL);
+    if (MP2) {
+        # mp's Apache::Scoreboard::fetch needs a pool arg
+        $pool = APR::Pool->new;
+        unshift @args, $pool;
+    }
+
+    my $image = Apache::Scoreboard->fetch(@args);
     unless ($image){
         # reset the counters and timers
         %req_proc_time = ();
@@ -170,17 +201,19 @@ sub monitor {
         return;
     }
 
-    for (my $i = 0; $i<Apache::Constants::HARD_SERVER_LIMIT; $i++) {
-        my $pid = $image->parent($i)->pid;
+    for (my $i = 0; $i < $image->server_limit; $i++) {
+        my $parent_score = MP2 ? $image->parent_score($i) : $image->servers($i);
+        next unless $parent_score;
+
+        my $pid          = MP2 ? $parent_score->pid : $image->parent($i)->pid;
 
         last unless $pid;
 
-        my $process = $image->servers($i);
+        my $worker_score = MP2 ? $parent_score->worker_score : $parent_score;
 
         # we care only about processes that in 'W' status
-        # processing. this is very not clean coding style: (W means
-        # 'writing to a client' and it's equal to 4 in status field
-        next unless $process->status == 4;
+        # processing. (W means 'writing to a client')
+        next unless $worker_score->status eq 'W';
 
         # init if it's uninitialized (to non existant -1 count)
         # can't use ||= construct as a value can be 0...
@@ -190,9 +223,9 @@ sub monitor {
         # make sure the proc time is initialized
         $req_proc_time{$pid} ||= 0;
 
-        my $count = $process->my_access_count;
+        my $count = $worker_score->my_access_count;
         debug "OK: $i $pid ",
-            $process->status, " $count ",
+            $worker_score->status, " $count ",
             $req_proc_time{$pid}, " ",
             $req_number{$pid};
 
@@ -206,8 +239,8 @@ Killing httpd process $pid which is running for $req_proc_time{$pid} secs,
 which is longer than $Apache::Watchdog::RunAway::TIMEOUT secs limit.
 EOT
                 if ($Apache::Watchdog::RunAway::VERBOSE) {
-                    $error .= 'It was handling [' . $process->request() .
-                        '] for [' . $process->client() . "]\n";
+                    $error .= 'It was handling [' . $worker_score->request() .
+                        '] for [' . $worker_score->client() . "]\n";
                 }
                 log_error $error;
 
@@ -236,7 +269,14 @@ sub debug {
 }
 
 sub log_error {
-    print LOG  "[".scalar localtime()."] $$: " . __PACKAGE__ ,": ", @_, "\n";
+    unless ($log_fh) {
+        $log_fh = Symbol::gensym();
+        open $log_fh, ">>$Apache::Watchdog::RunAway::LOG_FILE"
+            or die "Cannot open $Apache::Watchdog::RunAway::LOG_FILE: $!";
+        my $oldfh = select($log_fh); $| = 1; select($oldfh);
+    }
+
+    print $log_fh "[".scalar localtime()."] $$: " . __PACKAGE__ ,": ", @_, "\n";
 }
 
 
